@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
+<title>Fruit Race</title>
+<meta name="description" content="Corrida tropical sem fim — desvia, apanha moedas, bate o recorde."/>
+<meta name="theme-color" content="#0A130C"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Fruit Race"/>
+
+<!-- PWA manifest (inline as data URI so the file is fully self-contained) -->
+<link rel="manifest" id="manifest-link"/>
+
+<!-- App icon (inline SVG data URI — emoji on dark rounded background) -->
+<link rel="icon" id="icon-link" sizes="192x192"/>
+<link rel="apple-touch-icon" id="apple-icon-link"/>
+
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #0A130C;
+    overscroll-behavior: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #root {
+    min-height: 100vh;
+  }
+  * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+
+<div id="root"></div>
+
+<!-- React + ReactDOM (UMD builds) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<!-- Babel standalone: lets the browser parse JSX directly, no build step needed -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script>
+  // ── Build the PWA manifest + icon at runtime as data URIs ──
+  const iconSvg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="192" height="192" viewBox="0 0 192 192">
+      <rect width="192" height="192" rx="36" fill="#0A130C"/>
+      <rect x="8" y="8" width="176" height="176" rx="30" fill="#2D4A2A"/>
+      <text x="96" y="118" font-size="100" text-anchor="middle">🍓</text>
+    </svg>`;
+  const iconDataUri = "data:image/svg+xml;base64," + btoa(iconSvg);
+
+  const manifest = {
+    name: "Fruit Race",
+    short_name: "FruitRace",
+    description: "Corrida tropical sem fim — desvia, apanha moedas, bate o recorde.",
+    start_url: ".",
+    display: "standalone",
+    orientation: "portrait",
+    background_color: "#0A130C",
+    theme_color: "#0A130C",
+    icons: [
+      { src: iconDataUri, sizes: "192x192", type: "image/svg+xml", purpose: "any maskable" },
+      { src: iconDataUri, sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }
+    ]
+  };
+  const manifestBlob = new Blob([JSON.stringify(manifest)], { type: "application/json" });
+  const manifestUrl = URL.createObjectURL(manifestBlob);
+  document.getElementById("manifest-link").setAttribute("href", manifestUrl);
+  document.getElementById("icon-link").setAttribute("href", iconDataUri);
+  document.getElementById("apple-icon-link").setAttribute("href", iconDataUri);
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── GAME CONSTANTS ──────────────────────────────────────────────────────────
+const LANE_COUNT = 3;
+const GAME_WIDTH = 360;
+const GAME_HEIGHT = 560;
+const LANE_WIDTH = GAME_WIDTH / LANE_COUNT;
+const PLAYER_SIZE = 52;
+const OBSTACLE_SIZE = 46;
+const BASE_SPEED = 3.2;
+const SPEED_RAMP = 0.0009;
+
+const FRUITS = ['🍓', '🍍', '🥭', '🍉', '🍊', '🥝'];
+const RIVALS = ['🍌', '🍆', '🥑', '🫐'];
+
+function laneX(lane) {
+  return lane * LANE_WIDTH + LANE_WIDTH / 2;
+}
+
+// ── MAIN COMPONENT ───────────────────────────────────────────────────────────
+function FruitRaceGame() {
+  const [screen, setScreen] = useState('menu');
+  const [score, setScore] = useState(0);
+  const [best, setBest] = useState(0);
+  const [coins, setCoins] = useState(0);
+  const [playerFruit, setPlayerFruit] = useState('🍓');
+  const [lane, setLane] = useState(1);
+  const [obstacles, setObstacles] = useState([]);
+  const [pickups, setPickups] = useState([]);
+  const [speed, setSpeed] = useState(BASE_SPEED);
+  const [shake, setShake] = useState(false);
+  const [flashCoin, setFlashCoin] = useState(false);
+
+  const laneRef = useRef(1);
+  const speedRef = useRef(BASE_SPEED);
+  const scoreRef = useRef(0);
+  const obstaclesRef = useRef([]);
+  const pickupsRef = useRef([]);
+  const lastSpawnRef = useRef(0);
+  const rafRef = useRef(null);
+  const startTimeRef = useRef(0);
+  const idCounter = useRef(0);
+
+  const moveLeft = useCallback(() => {
+    laneRef.current = Math.max(0, laneRef.current - 1);
+    setLane(laneRef.current);
+  }, []);
+  const moveRight = useCallback(() => {
+    laneRef.current = Math.min(LANE_COUNT - 1, laneRef.current + 1);
+    setLane(laneRef.current);
+  }, []);
+
+  useEffect(() => {
+    function onKey(e) {
+      if (screen !== 'playing') return;
+      if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') moveLeft();
+      if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') moveRight();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [screen, moveLeft, moveRight]);
+
+  const touchStartX = useRef(null);
+  function onTouchStart(e) {
+    touchStartX.current = e.touches[0].clientX;
+  }
+  function onTouchEnd(e) {
+    if (touchStartX.current == null) return;
+    const dx = e.changedTouches[0].clientX - touchStartX.current;
+    if (dx > 30) moveRight();
+    else if (dx < -30) moveLeft();
+    touchStartX.current = null;
+  }
+
+  function startGame(fruit) {
+    setPlayerFruit(fruit);
+    laneRef.current = 1;
+    speedRef.current = BASE_SPEED;
+    scoreRef.current = 0;
+    obstaclesRef.current = [];
+    pickupsRef.current = [];
+    lastSpawnRef.current = 0;
+    setLane(1);
+    setScore(0);
+    setSpeed(BASE_SPEED);
+    setObstacles([]);
+    setPickups([]);
+    startTimeRef.current = performance.now();
+    setScreen('playing');
+  }
+
+  function endGame() {
+    setScreen('gameover');
+    const finalScore = Math.floor(scoreRef.current);
+    const earnedCoins = Math.floor(finalScore / 8);
+    const newBest = Math.max(best, finalScore);
+    const newCoins = coins + earnedCoins;
+    setScore(finalScore);
+    setBest(newBest);
+    setCoins(newCoins);
+    setShake(true);
+    setTimeout(() => setShake(false), 400);
+  }
+
+  useEffect(() => {
+    if (screen !== 'playing') return;
+
+    function tick(now) {
+      const elapsed = now - startTimeRef.current;
+      speedRef.current = BASE_SPEED + elapsed * SPEED_RAMP;
+      scoreRef.current += speedRef.current * 0.08;
+
+      if (now - lastSpawnRef.current > Math.max(420, 950 - elapsed / 60)) {
+        lastSpawnRef.current = now;
+        const lanesUsed = new Set();
+        const numObstacles = Math.random() < 0.65 ? 1 : 2;
+        for (let i = 0; i < numObstacles; i++) {
+          let l = Math.floor(Math.random() * LANE_COUNT);
+          if (lanesUsed.has(l)) continue;
+          lanesUsed.add(l);
+          idCounter.current += 1;
+          obstaclesRef.current.push({
+            id: idCounter.current,
+            lane: l,
+            y: -OBSTACLE_SIZE,
+            emoji: RIVALS[Math.floor(Math.random() * RIVALS.length)],
+          });
+        }
+        if (Math.random() < 0.5 && lanesUsed.size < LANE_COUNT) {
+          let freeLanes = [0, 1, 2].filter(l => !lanesUsed.has(l));
+          let l = freeLanes[Math.floor(Math.random() * freeLanes.length)];
+          idCounter.current += 1;
+          pickupsRef.current.push({
+            id: idCounter.current,
+            lane: l,
+            y: -OBSTACLE_SIZE,
+          });
+        }
+      }
+
+      obstaclesRef.current = obstaclesRef.current
+        .map(o => ({ ...o, y: o.y + speedRef.current * 2.6 }))
+        .filter(o => o.y < GAME_HEIGHT + 60);
+
+      pickupsRef.current = pickupsRef.current
+        .map(p => ({ ...p, y: p.y + speedRef.current * 2.6 }))
+        .filter(p => p.y < GAME_HEIGHT + 60);
+
+      const playerY = GAME_HEIGHT - 100;
+      for (const o of obstaclesRef.current) {
+        if (o.lane === laneRef.current && o.y > playerY - 36 && o.y < playerY + 36) {
+          endGame();
+          return;
+        }
+      }
+
+      const remainingPickups = [];
+      let collected = 0;
+      for (const p of pickupsRef.current) {
+        if (p.lane === laneRef.current && p.y > playerY - 40 && p.y < playerY + 40) {
+          collected += 1;
+        } else {
+          remainingPickups.push(p);
+        }
+      }
+      if (collected > 0) {
+        scoreRef.current += collected * 15;
+        setFlashCoin(true);
+        setTimeout(() => setFlashCoin(false), 200);
+      }
+      pickupsRef.current = remainingPickups;
+
+      setObstacles([...obstaclesRef.current]);
+      setPickups([...pickupsRef.current]);
+      setScore(Math.floor(scoreRef.current));
+      setSpeed(speedRef.current);
+
+      rafRef.current = requestAnimationFrame(tick);
+    }
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [screen]);
+
+  const speedKmh = Math.round(speed * 28);
+
+  return (
+    <div style={styles.page}>
+      <div
+        style={{
+          ...styles.gameFrame,
+          animation: shake ? 'frShake 0.4s' : 'none',
+        }}
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+      >
+        <style>{KEYFRAMES}</style>
+
+        <div style={styles.track}>
+          {Array.from({ length: LANE_COUNT - 1 }).map((_, i) => (
+            <div
+              key={i}
+              style={{
+                ...styles.laneLine,
+                left: `${((i + 1) * LANE_WIDTH) / GAME_WIDTH * 100}%`,
+              }}
+            />
+          ))}
+          <ScrollingDashes speed={speed} screen={screen} />
+        </div>
+
+        {screen === 'menu' && (
+          <MenuScreen best={best} coins={coins} onStart={startGame} />
+        )}
+
+        {screen === 'playing' && (
+          <>
+            <div style={styles.hud}>
+              <div style={styles.hudScore}>
+                <span style={styles.hudLabel}>SCORE</span>
+                <span style={styles.hudValue}>{score}</span>
+              </div>
+              <div style={styles.hudSpeed}>
+                <span style={styles.hudSpeedValue}>{speedKmh}</span>
+                <span style={styles.hudSpeedLabel}>km/h</span>
+              </div>
+            </div>
+
+            {flashCoin && <div style={styles.coinFlash}>+15 🪙</div>}
+
+            {obstacles.map(o => (
+              <div
+                key={o.id}
+                style={{
+                  ...styles.sprite,
+                  left: laneX(o.lane) - OBSTACLE_SIZE / 2,
+                  top: o.y,
+                  width: OBSTACLE_SIZE,
+                  height: OBSTACLE_SIZE,
+                  fontSize: OBSTACLE_SIZE * 0.72,
+                }}
+              >
+                {o.emoji}
+              </div>
+            ))}
+
+            {pickups.map(p => (
+              <div
+                key={p.id}
+                style={{
+                  ...styles.sprite,
+                  left: laneX(p.lane) - 18,
+                  top: p.y,
+                  width: 36,
+                  height: 36,
+                  fontSize: 26,
+                  filter: 'drop-shadow(0 0 6px rgba(255,215,0,0.8))',
+                  animation: 'frSpin 1.2s linear infinite',
+                }}
+              >
+                🪙
+              </div>
+            ))}
+
+            <div style={{ ...styles.player, left: laneX(lane) - PLAYER_SIZE / 2 }}>
+              <div style={styles.playerShadow} />
+              <div style={styles.playerEmoji}>{playerFruit}</div>
+            </div>
+
+            <button aria-label="Move left" onClick={moveLeft} style={{ ...styles.ctrlBtn, left: 10 }}>‹</button>
+            <button aria-label="Move right" onClick={moveRight} style={{ ...styles.ctrlBtn, right: 10 }}>›</button>
+          </>
+        )}
+
+        {screen === 'gameover' && (
+          <GameOverScreen
+            score={score}
+            best={best}
+            coins={coins}
+            onRetry={() => startGame(playerFruit)}
+            onMenu={() => setScreen('menu')}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MenuScreen({ best, coins, onStart }) {
+  const [selected, setSelected] = useState('🍓');
+  return (
+    <div style={styles.overlay}>
+      <div style={styles.titleWrap}>
+        <span style={styles.titleEmoji}>🏁</span>
+        <h1 style={styles.title}>FRUIT RACE</h1>
+        <p style={styles.subtitle}>corrida tropical sem fim</p>
+      </div>
+      <div style={styles.statsRow}>
+        <div style={styles.statPill}><span style={styles.statIcon}>🏆</span><span>{best}</span></div>
+        <div style={styles.statPill}><span style={styles.statIcon}>🪙</span><span>{coins}</span></div>
+      </div>
+      <p style={styles.pickLabel}>Escolhe a tua fruta</p>
+      <div style={styles.fruitGrid}>
+        {FRUITS.map(f => (
+          <button
+            key={f}
+            onClick={() => setSelected(f)}
+            style={{ ...styles.fruitBtn, ...(selected === f ? styles.fruitBtnActive : {}) }}
+          >
+            {f}
+          </button>
+        ))}
+      </div>
+      <button style={styles.playBtn} onClick={() => onStart(selected)}>JOGAR ▶</button>
+      <p style={styles.hint}>← → ou arrasta para desviar dos rivais</p>
+    </div>
+  );
+}
+
+function GameOverScreen({ score, best, coins, onRetry, onMenu }) {
+  const isNewBest = score >= best && score > 0;
+  return (
+    <div style={styles.overlay}>
+      <div style={styles.crashEmoji}>💥</div>
+      <h2 style={styles.goTitle}>{isNewBest ? 'NOVO RECORDE!' : 'FIM DE JOGO'}</h2>
+      <div style={styles.scoreCard}>
+        <div style={styles.scoreCardRow}><span>Pontuação</span><strong>{score}</strong></div>
+        <div style={styles.scoreCardRow}><span>Melhor</span><strong>{best}</strong></div>
+        <div style={styles.scoreCardRow}><span>🪙 Moedas totais</span><strong>{coins}</strong></div>
+      </div>
+      <button style={styles.playBtn} onClick={onRetry}>TENTAR DE NOVO ↻</button>
+      <button style={styles.menuBtn} onClick={onMenu}>Menu</button>
+    </div>
+  );
+}
+
+function ScrollingDashes({ speed, screen }) {
+  const [offset, setOffset] = useState(0);
+  const rafRef = useRef(null);
+  useEffect(() => {
+    if (screen !== 'playing') return;
+    function tick() {
+      setOffset(o => (o + speed * 2.2) % 80);
+      rafRef.current = requestAnimationFrame(tick);
+    }
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [speed, screen]);
+
+  return (
+    <>
+      <div style={{ ...styles.dashLine, left: `${LANE_WIDTH / GAME_WIDTH * 100}%`, backgroundPositionY: offset }} />
+      <div style={{ ...styles.dashLine, left: `${2 * LANE_WIDTH / GAME_WIDTH * 100}%`, backgroundPositionY: offset }} />
+    </>
+  );
+}
+
+const COLORS = {
+  bg: '#0E1B12', road: '#2D4A2A', lane: 'rgba(255,255,255,0.35)',
+  gold: '#FFC93C', coral: '#FF6B5C', cream: '#FFF6E5', leaf: '#4CAF6D', deep: '#0A130C',
+};
+
+const KEYFRAMES = `
+@keyframes frShake {
+  0% { transform: translateX(0); }
+  20% { transform: translateX(-8px) rotate(-1deg); }
+  40% { transform: translateX(8px) rotate(1deg); }
+  60% { transform: translateX(-5px); }
+  80% { transform: translateX(5px); }
+  100% { transform: translateX(0); }
+}
+@keyframes frSpin { from { transform: rotateY(0deg); } to { transform: rotateY(360deg); } }
+@keyframes frBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+@keyframes frPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.85; transform: scale(1.04); } }
+@keyframes frFloatUp {
+  0% { opacity: 0; transform: translateY(0) scale(0.8); }
+  20% { opacity: 1; transform: translateY(-10px) scale(1.1); }
+  100% { opacity: 0; transform: translateY(-50px) scale(1); }
+}
+`;
+
+const styles = {
+  page: {
+    minHeight: '100vh', background: `radial-gradient(ellipse at top, #1A2E1A 0%, ${COLORS.deep} 70%)`,
+    display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px 12px',
+    fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
+  },
+  gameFrame: {
+    position: 'relative', width: GAME_WIDTH, height: GAME_HEIGHT, borderRadius: 24, overflow: 'hidden',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.6), 0 0 0 6px #1B3318, 0 0 0 8px #FFC93C',
+    background: COLORS.bg, touchAction: 'none', userSelect: 'none',
+  },
+  track: { position: 'absolute', inset: 0, background: COLORS.road },
+  laneLine: { position: 'absolute', top: 0, bottom: 0, width: 0 },
+  dashLine: {
+    position: 'absolute', top: 0, bottom: 0, width: 4, marginLeft: -2,
+    backgroundImage: `repeating-linear-gradient(to bottom, ${COLORS.lane} 0px, ${COLORS.lane} 26px, transparent 26px, transparent 52px)`,
+  },
+  hud: { position: 'absolute', top: 14, left: 14, right: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', zIndex: 5 },
+  hudScore: { display: 'flex', flexDirection: 'column', background: 'rgba(10,19,12,0.55)', backdropFilter: 'blur(4px)', padding: '6px 14px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)' },
+  hudLabel: { fontSize: 9, letterSpacing: '0.12em', color: COLORS.gold, fontWeight: 700 },
+  hudValue: { fontSize: 20, color: COLORS.cream, fontWeight: 800, lineHeight: 1.1 },
+  hudSpeed: { display: 'flex', alignItems: 'baseline', gap: 4, background: 'rgba(10,19,12,0.55)', backdropFilter: 'blur(4px)', padding: '6px 12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.12)' },
+  hudSpeedValue: { fontSize: 16, color: COLORS.coral, fontWeight: 800 },
+  hudSpeedLabel: { fontSize: 10, color: 'rgba(255,255,255,0.6)' },
+  coinFlash: { position: 'absolute', top: 70, left: '50%', transform: 'translateX(-50%)', color: COLORS.gold, fontWeight: 800, fontSize: 18, zIndex: 6, animation: 'frFloatUp 0.7s ease-out forwards', textShadow: '0 2px 6px rgba(0,0,0,0.5)' },
+  sprite: { position: 'absolute', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 3, filter: 'drop-shadow(0 4px 4px rgba(0,0,0,0.4))' },
+  player: { position: 'absolute', bottom: 60, width: PLAYER_SIZE, height: PLAYER_SIZE, zIndex: 4, transition: 'left 0.12s cubic-bezier(.2,.8,.3,1.2)' },
+  playerShadow: { position: 'absolute', bottom: -8, left: '50%', transform: 'translateX(-50%)', width: PLAYER_SIZE * 0.7, height: 10, borderRadius: '50%', background: 'rgba(0,0,0,0.4)', filter: 'blur(2px)' },
+  playerEmoji: { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: PLAYER_SIZE * 0.72, animation: 'frBob 0.5s ease-in-out infinite' },
+  ctrlBtn: { position: 'absolute', bottom: 50, width: 46, height: 46, borderRadius: '50%', border: 'none', background: 'rgba(255,255,255,0.14)', color: 'rgba(255,255,255,0.85)', fontSize: 22, fontWeight: 700, zIndex: 5, backdropFilter: 'blur(3px)', cursor: 'pointer' },
+  overlay: { position: 'absolute', inset: 0, zIndex: 10, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(180deg, rgba(10,19,12,0.94) 0%, rgba(20,35,18,0.97) 100%)', padding: '24px', textAlign: 'center' },
+  titleWrap: { marginBottom: 18 },
+  titleEmoji: { fontSize: 38, display: 'block', marginBottom: 4 },
+  title: { margin: 0, fontSize: 30, letterSpacing: '0.04em', color: COLORS.cream, fontWeight: 900, textShadow: `0 3px 0 ${COLORS.coral}, 0 6px 14px rgba(0,0,0,0.4)` },
+  subtitle: { margin: '6px 0 0', color: COLORS.leaf, fontSize: 13, letterSpacing: '0.08em', textTransform: 'uppercase', fontWeight: 600 },
+  statsRow: { display: 'flex', gap: 12, marginBottom: 22 },
+  statPill: { display: 'flex', alignItems: 'center', gap: 6, background: 'rgba(255,255,255,0.08)', padding: '8px 16px', borderRadius: 20, color: COLORS.cream, fontWeight: 700, fontSize: 14, border: '1px solid rgba(255,255,255,0.1)' },
+  statIcon: { fontSize: 16 },
+  pickLabel: { color: 'rgba(255,255,255,0.65)', fontSize: 13, marginBottom: 10, fontWeight: 600 },
+  fruitGrid: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 8, marginBottom: 26 },
+  fruitBtn: { width: 42, height: 42, fontSize: 22, borderRadius: 12, border: '2px solid transparent', background: 'rgba(255,255,255,0.07)', cursor: 'pointer', transition: 'all 0.15s' },
+  fruitBtnActive: { border: `2px solid ${COLORS.gold}`, background: 'rgba(255,201,60,0.18)', transform: 'scale(1.12)' },
+  playBtn: { background: `linear-gradient(180deg, #FFD568 0%, ${COLORS.gold} 100%)`, color: '#2A1B00', border: 'none', fontWeight: 800, fontSize: 16, letterSpacing: '0.04em', padding: '15px 42px', borderRadius: 14, cursor: 'pointer', boxShadow: '0 6px 0 #B8860B, 0 10px 20px rgba(0,0,0,0.35)', marginBottom: 10 },
+  menuBtn: { background: 'transparent', color: 'rgba(255,255,255,0.6)', border: '1px solid rgba(255,255,255,0.25)', fontWeight: 600, fontSize: 13, padding: '10px 28px', borderRadius: 10, cursor: 'pointer' },
+  hint: { marginTop: 18, color: 'rgba(255,255,255,0.4)', fontSize: 11.5, letterSpacing: '0.02em' },
+  crashEmoji: { fontSize: 52, marginBottom: 6, animation: 'frPulse 1s ease-in-out infinite' },
+  goTitle: { color: COLORS.coral, fontSize: 22, letterSpacing: '0.04em', margin: '0 0 20px', fontWeight: 900 },
+  scoreCard: { background: 'rgba(255,255,255,0.06)', borderRadius: 14, padding: '16px 24px', width: '100%', maxWidth: 260, marginBottom: 24, border: '1px solid rgba(255,255,255,0.1)' },
+  scoreCardRow: { display: 'flex', justifyContent: 'space-between', color: COLORS.cream, fontSize: 14, padding: '7px 0', borderBottom: '1px solid rgba(255,255,255,0.08)' },
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<FruitRaceGame />);
+</script>
+
+</body>
+</html>
